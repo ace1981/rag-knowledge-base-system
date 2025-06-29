@@ -22,21 +22,19 @@ python-docx==0.8.11
 python-dateutil==2.8.2
 
 # JSON处理
-orjson==3.9.10
+orjson==3.9.4
 
 # 类型提示
-typing-extensions==4.8.0
+typing-extensions==4.7.1
 
 # 进度条
-tqdm==4.66.1
+tqdm==4.65.0
 
-# 日志
-loguru==0.7.2
+# 日志系统
+loguru==0.7.0
 
 # Web框架
-Flask==2.3.3
+Flask==2.3.2
 Flask-CORS==4.0.0
-Werkzeug==2.3.7
-
-# 文件上传处理
+Werkzeug==2.3.6
 Flask-Uploads==0.2.1

@@ -66,6 +66,7 @@ class RAGWebService:
                 print("✅ 数据库管理器初始化成功")
             except Exception as e:
                 print(f"❌ 数据库管理器初始化失败: {e}")
+                self.db_manager = None
                 # 数据库失败不阻止启动，继续初始化其他组件
             
             # 初始化Ollama客户端
@@ -112,6 +113,7 @@ class RAGWebService:
                 print("✅ 向量存储初始化成功")
             except Exception as e:
                 print(f"❌ 向量存储初始化失败: {e}")
+                self.vector_store = None
             
             return True
             
@@ -214,12 +216,23 @@ class RAGWebService:
                 return {"success": False, "error": "向量生成失败"}
             
             # 存储到向量数据库
-            # 分离向量和元数据
-            vector_list = [item["vector"] for item in vectors]
-            metadata_list = [item["payload"] for item in vectors]
-            success = self.vector_store.add_vectors(vector_list, metadata_list)
-            if not success:
-                return {"success": False, "error": "向量存储失败"}
+            vectors_stored = False
+            if self.vector_store is None:
+                print("⚠️ 向量存储未初始化，跳过向量存储步骤")
+            else:
+                # 分离向量和元数据
+                vector_list = [item["vector"] for item in vectors]
+                metadata_list = [item["payload"] for item in vectors]
+                
+                try:
+                    point_ids = self.vector_store.add_vectors(vector_list, metadata_list)
+                    if point_ids:
+                        vectors_stored = True
+                        print(f"✅ 向量存储成功，存储了{len(point_ids)}个向量")
+                    else:
+                        print("⚠️ 向量存储失败，但文档仍会保存")
+                except Exception as e:
+                    print(f"⚠️ 向量存储失败: {e}，但文档仍会保存")
             
             # 记录文档信息
             doc_info = {
@@ -234,19 +247,34 @@ class RAGWebService:
             }
             
             # 保存到数据库
-            self.db_manager.add_document(doc_info)
+            if self.db_manager:
+                try:
+                    self.db_manager.add_document(doc_info)
+                except Exception as e:
+                    print(f"⚠️ 数据库保存文档信息失败: {e}")
+            else:
+                print("⚠️ 数据库管理器未初始化，文档信息仅保存到内存")
             
             # 临时保存到内存（向后兼容）
             self.documents[file_id] = doc_info
             
-            print(f"✅ 文档处理完成: {original_filename}, 生成{len(vectors)}个向量")
+            # 构建返回信息
+            message = f"文档处理完成: {original_filename}, 生成{len(vectors)}个向量"
+            if vectors_stored:
+                message += "，向量存储成功"
+                print(f"✅ {message}")
+            else:
+                message += "，向量存储失败（文档仍可用于基础对话）"
+                print(f"⚠️ {message}")
             
             return {
                 "success": True,
                 "file_id": file_id,
                 "filename": original_filename,  # 返回原始文件名
                 "chunks_count": len(chunks),
-                "vectors_count": len(vectors)
+                "vectors_count": len(vectors),
+                "vectors_stored": vectors_stored,
+                "message": message
             }
             
         except Exception as e:
@@ -266,13 +294,24 @@ class RAGWebService:
             
             # 清理向量存储
             if self.vector_store:
-                success = self.vector_store.clear_collection()
-                if not success:
-                    return {"success": False, "error": "向量存储清理失败"}
+                try:
+                    success = self.vector_store.clear_collection()
+                    if not success:
+                        return {"success": False, "error": "向量存储清理失败"}
+                except Exception as e:
+                    print(f"⚠️ 向量存储清理失败: {e}")
+                    # 继续执行其他清理操作
             
             # 清理数据库中的文档记录
             if self.db_manager:
-                self.db_manager.clear_all_documents()
+                try:
+                    success = self.db_manager.clear_all_documents()
+                    if not success:
+                        print("⚠️ 数据库文档记录清理失败")
+                except Exception as e:
+                    print(f"⚠️ 数据库清理失败: {e}")
+            else:
+                print("⚠️ 数据库管理器未初始化，跳过数据库清理")
             
             # 清理内存中的文档记录（向后兼容）
             self.documents.clear()
@@ -363,11 +402,73 @@ class RAGWebService:
                 return {"success": False, "error": "问题向量化失败"}
             
             # 搜索相关文档
-            search_results = self.vector_store.search_similar(
-                query_vector=question_vector,
-                top_k=top_k,
-                score_threshold=0.3
-            )
+            if self.vector_store is None:
+                # 向量存储未初始化，使用基础模型直接回答
+                system_thinking = f"向量存储未初始化，无法搜索知识库，将使用基础模型直接回答问题'{question}'。"
+                prompt = f"请回答以下问题：{question}"
+                raw_response = self.ollama_client.generate_response(prompt)
+                if not raw_response:
+                    return {"success": False, "error": "回答生成失败"}
+                
+                response_data = {
+                    "success": True,
+                    "answer": raw_response,
+                    "sources": [],
+                    "system_thinking": system_thinking,
+                    "context_used": False
+                }
+                
+                # 保存对话历史
+                self.chat_history.append({
+                    "question": question,
+                    "answer": raw_response,
+                    "timestamp": datetime.now().isoformat(),
+                    "sources": [],
+                    "context_used": False
+                })
+                
+                return response_data
+            
+            try:
+                search_results = self.vector_store.search_similar(
+                    query_vector=question_vector,
+                    top_k=top_k,
+                    score_threshold=0.05  # 进一步降低阈值以提高召回率
+                )
+                print(f"🔍 搜索结果数量: {len(search_results)}")
+                if search_results:
+                    print(f"🔍 搜索结果示例: {search_results[0]}")
+                    for i, result in enumerate(search_results[:3]):
+                        score = result.get('score', 0)
+                        payload = result.get('payload', {})
+                        filename = payload.get('filename', '未知')
+                        print(f"🔍 结果{i+1}: 文件={filename}, 相似度={score:.4f}")
+            except Exception as e:
+                # 搜索失败，使用基础模型直接回答
+                system_thinking = f"向量搜索失败({str(e)})，将使用基础模型直接回答问题'{question}'。"
+                prompt = f"请回答以下问题：{question}"
+                raw_response = self.ollama_client.generate_response(prompt)
+                if not raw_response:
+                    return {"success": False, "error": "回答生成失败"}
+                
+                response_data = {
+                    "success": True,
+                    "answer": raw_response,
+                    "sources": [],
+                    "system_thinking": system_thinking,
+                    "context_used": False
+                }
+                
+                # 保存对话历史
+                self.chat_history.append({
+                    "question": question,
+                    "answer": raw_response,
+                    "timestamp": datetime.now().isoformat(),
+                    "sources": [],
+                    "context_used": False
+                })
+                
+                return response_data
             
             if not search_results:
                 # 没有找到相关文档，使用基础模型直接回答
@@ -405,9 +506,9 @@ class RAGWebService:
                 chunk_index = payload.get('chunk_index', 0)
                 score = result.get('score', 0)
                 
-                # 过滤相似度低于0.5的结果
-                if score < 0.5:
-                    continue
+                # 过滤相似度低于0.3的结果
+                # if score < 0.3:
+                #     continue
                     
                 context_parts.append(text)
                 sources.append({
@@ -420,7 +521,7 @@ class RAGWebService:
             # 检查过滤后是否还有有效结果
             if not context_parts:
                 # 没有找到足够相关的文档，使用基础模型直接回答
-                system_thinking = f"虽然找到了{len(search_results)}个相关文档，但相似度都低于0.5阈值，将使用基础模型进行回答。"
+                system_thinking = f"虽然找到了{len(search_results)}个相关文档，但相似度都低于0.05阈值，将使用基础模型进行回答。"
                 prompt = f"请回答以下问题：{question}"
                 raw_response = self.ollama_client.generate_response(prompt)
                 if not raw_response:
@@ -506,7 +607,17 @@ class RAGWebService:
             Dict: 包含文档列表和分页信息
         """
         try:
-            documents, total = self.db_manager.get_documents(page, page_size)
+            if not self.db_manager:
+                # 降级到内存数据
+                docs_list = list(self.documents.values())
+                total = len(docs_list)
+                start_idx = (page - 1) * page_size
+                end_idx = start_idx + page_size
+                documents = docs_list[start_idx:end_idx]
+                print("⚠️ 数据库管理器未初始化，使用内存数据")
+            else:
+                documents, total = self.db_manager.get_documents(page, page_size)
+            
             total_pages = (total + page_size - 1) // page_size  # 向上取整
             
             return {
@@ -548,8 +659,19 @@ class RAGWebService:
             Dict: 删除结果
         """
         try:
-            # 从数据库获取文档信息
-            doc_info = self.db_manager.get_document_by_id(file_id)
+            # 从数据库或内存获取文档信息
+            doc_info = None
+            if self.db_manager:
+                try:
+                    doc_info = self.db_manager.get_document_by_id(file_id)
+                except Exception as e:
+                    print(f"⚠️ 数据库查询文档失败: {e}")
+            
+            # 降级到内存数据
+            if not doc_info and file_id in self.documents:
+                doc_info = self.documents[file_id]
+                print("⚠️ 使用内存数据获取文档信息")
+            
             if not doc_info:
                 return {"success": False, "error": "文档不存在"}
             
@@ -562,10 +684,18 @@ class RAGWebService:
             # 注意：这里简化处理，实际应该实现向量删除功能
             
             # 从数据库中删除记录
-            if self.db_manager.delete_document(file_id):
-                # 从内存中删除（向后兼容）
-                if file_id in self.documents:
-                    del self.documents[file_id]
+            db_deleted = False
+            if self.db_manager:
+                try:
+                    db_deleted = self.db_manager.delete_document(file_id)
+                except Exception as e:
+                    print(f"⚠️ 数据库删除文档失败: {e}")
+            
+            # 从内存中删除（向后兼容）
+            if file_id in self.documents:
+                del self.documents[file_id]
+            
+            if db_deleted or not self.db_manager:
                 return {"success": True, "message": "文档删除成功"}
             else:
                 return {"success": False, "error": "数据库删除失败"}
@@ -582,6 +712,23 @@ class RAGWebService:
             Dict: 统计信息
         """
         try:
+            if not self.db_manager:
+                # 降级到内存数据统计
+                total_docs = len(self.documents)
+                total_chats = len(self.chat_history)
+                print("⚠️ 数据库管理器未初始化，使用内存数据统计")
+                
+                return {
+                    "success": True,
+                    "stats": {
+                        "total_documents": total_docs,
+                        "total_chunks": 0,  # 无法从内存获取
+                        "total_vectors": 0,  # 无法从内存获取
+                        "total_chats": total_chats,
+                        "system_status": "运行正常（数据库未连接）"
+                    }
+                }
+            
             stats = self.db_manager.get_stats()
             
             return {
@@ -746,7 +893,7 @@ def stream_chat(question, top_k=1):
             score = result.get('score', 0)
             
             # 过滤相似度低于0.5的结果
-            if score < 0.5:
+            if score < 0.3:
                 continue
                 
             context_parts.append(text)
