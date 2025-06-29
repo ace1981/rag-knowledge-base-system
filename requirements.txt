@@ -1,0 +1,42 @@
+# Qdrant向量数据库客户端
+qdrant-client==1.7.0
+
+# HTTP请求库
+requests==2.31.0
+
+# 数据处理
+numpy==1.24.3
+pandas==2.0.3
+
+# 文本处理
+nltk==3.8.1
+
+# 环境变量管理
+python-dotenv==1.0.0
+
+# 文档处理
+PyPDF2==3.0.1
+python-docx==0.8.11
+
+# 日期时间处理
+python-dateutil==2.8.2
+
+# JSON处理
+orjson==3.9.10
+
+# 类型提示
+typing-extensions==4.8.0
+
+# 进度条
+tqdm==4.66.1
+
+# 日志
+loguru==0.7.2
+
+# Web框架
+Flask==2.3.3
+Flask-CORS==4.0.0
+Werkzeug==2.3.7
+
+# 文件上传处理
+Flask-Uploads==0.2.1
